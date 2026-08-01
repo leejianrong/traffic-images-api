@@ -47,6 +47,16 @@ package — only the weights are YOLOv8, fetched at runtime and never committed.
 ```bash
 uvx ruff check src && uvx ruff format src   # lint + format
 uvx ty check src                            # type-check (strict typing everywhere)
+uv run pytest                               # offline tests (no model/network)
+```
+
+**Gates.** A pre-push hook (`.githooks/pre-push`) runs the cheap checks above
+before every push, mirroring the CI jobs in `.github/workflows/ci.yml`
+(lint + type-check + offline tests, all in parallel, frozen installs). Enable it
+once per clone — then a push rarely lands red:
+
+```bash
+git config core.hooksPath .githooks   # bypass a single push with --no-verify
 ```
 
 ## Gotchas

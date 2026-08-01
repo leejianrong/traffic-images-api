@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fast pre-push gate — mirrors the cheap CI jobs (lint + type-check + offline
+# tests) so a push rarely lands red. Everything here runs in-process with no
+# model and no network, matching .github/workflows/ci.yml.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass for a rare case:  git push --no-verify
+set -e
+
+echo "▶ ruff check";        uvx ruff check src tests
+echo "▶ ruff format --check"; uvx ruff format --check src tests
+echo "▶ ty check";          uvx ty check src
+echo "▶ pytest";            uv run pytest -q
+echo "✓ pre-push checks passed"
