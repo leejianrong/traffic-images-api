@@ -14,16 +14,19 @@ import time
 from typing import Annotated, Optional
 
 import httpx
+import numpy as np
 import typer
+from PIL import Image
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress
 from rich.table import Table
 
-from . import api, congestion, render, sprites
+from . import api, congestion, render, segment, sprites, tiles
 from .api import Camera, TrafficAPIError
 from .congestion import Congestion
 from .detect import Detection, DetectionError, Detector, resolve_model
+from .segment import Segmenter, SegmentationError
 
 app = typer.Typer(
     name="sgtraffic",
@@ -123,6 +126,22 @@ def _build_detector(model: str | None, conf: float) -> Detector:
         raise  # unreachable; _fatal exits. keeps type-checkers happy.
 
 
+def _build_segmenter(model: str | None) -> Segmenter:
+    """Resolve (downloading if needed) the segmentation model and load it, or exit."""
+    try:
+        with Progress(transient=True, console=console) as progress:
+            task = progress.add_task("[cyan]Fetching segmentation model…", total=None)
+
+            def _on_progress(done: int, total: int) -> None:
+                progress.update(task, completed=done, total=total or None)
+
+            path = segment.resolve_model(model, on_progress=_on_progress)
+        return Segmenter(path)
+    except SegmentationError as exc:
+        _fatal(str(exc))
+        raise  # unreachable; _fatal exits.
+
+
 def _gauge(cong: Congestion, width: int) -> tuple[str, int]:
     """Build the colored congestion bar + counts, and its exact visible width.
 
@@ -142,15 +161,31 @@ def _gauge(cong: Congestion, width: int) -> tuple[str, int]:
     return f"{color}{plain}{render.RESET}", len(plain)
 
 
-def _overlay_sprites(
-    image_bytes: bytes, bits: int, detector: Detector
-) -> tuple[render.RenderResult, Congestion]:
-    """Detect, stamp sprites onto the prepared buffer, and score congestion."""
-    small, orig_wh = render.prepare_frame(image_bytes, bits=bits)
-    detections = detector.detect(image_bytes)
-
-    orig_w, orig_h = orig_wh
+def _paint_background(
+    image_bytes: bytes, small: Image.Image, segmenter: Segmenter
+) -> None:
+    """Segment the frame and repaint the small buffer's background as tiles."""
     small_w, small_h = small.size
+    label_map = segmenter.segment(image_bytes)  # (orig_h, orig_w) uint8
+    # Nearest-resize the integer label map to the buffer, then map to categories.
+    small_labels = np.asarray(
+        Image.fromarray(label_map, "L").resize(
+            (small_w, small_h), Image.Resampling.NEAREST
+        )
+    )
+    tiles.paint(small, segment.to_category_map(small_labels))
+
+
+def _stamp_detections(
+    image_bytes: bytes,
+    small: Image.Image,
+    detector: Detector,
+    orig_wh: tuple[int, int],
+) -> Congestion:
+    """Detect vehicles, stamp sprites onto the buffer, and return the score."""
+    detections = detector.detect(image_bytes)
+    small_w, small_h = small.size
+    orig_w, orig_h = orig_wh
     scale_x = small_w / orig_w if orig_w else 1.0
     scale_y = small_h / orig_h if orig_h else 1.0
 
@@ -171,7 +206,31 @@ def _overlay_sprites(
         seed = int(x0) + int(y0)
         sprites.stamp(small, sprites.for_category(det.category, seed=seed), box)
 
-    return render.lines_from_image(small), congestion.score(detections, orig_wh)
+    return congestion.score(detections, (orig_w, orig_h))
+
+
+def _analyze_frame(
+    image_bytes: bytes,
+    bits: int,
+    *,
+    detector: Detector | None = None,
+    segmenter: Segmenter | None = None,
+) -> tuple[render.RenderResult, Congestion | None]:
+    """Prepare the buffer, optionally tile the background and stamp vehicles.
+
+    Order matters: background tiles are painted first (so sprites sit on top),
+    then vehicle sprites. Either stage is independent — ``--segment`` alone tiles
+    the scene, ``--detect`` alone overlays vehicles, together they de-make it.
+    """
+    small, orig_wh = render.prepare_frame(image_bytes, bits=bits)
+    if segmenter is not None:
+        _paint_background(image_bytes, small, segmenter)
+    cong = (
+        _stamp_detections(image_bytes, small, detector, orig_wh)
+        if detector is not None
+        else None
+    )
+    return render.lines_from_image(small), cong
 
 
 def _draw(
@@ -181,12 +240,16 @@ def _draw(
     bits: int,
     refresh: int | None,
     detector: Detector | None = None,
+    segmenter: Segmenter | None = None,
 ) -> None:
     """Clear screen and paint one framed frame (raw ANSI, printed directly)."""
     gauge = None
-    if detector is not None:
-        result, cong = _overlay_sprites(image_bytes, bits, detector)
-        gauge = _gauge(cong, result.cols)
+    if detector is not None or segmenter is not None:
+        result, cong = _analyze_frame(
+            image_bytes, bits, detector=detector, segmenter=segmenter
+        )
+        if cong is not None:
+            gauge = _gauge(cong, result.cols)
     else:
         result = render.render_result(image_bytes, bits=bits)
     ts = cam.timestamp.replace("T", " ")[:19] or "unknown"
@@ -242,18 +305,45 @@ def view(
             "--conf", min=0.0, max=1.0, help="Detection confidence threshold."
         ),
     ] = 0.25,
+    seg: Annotated[
+        bool,
+        typer.Option(
+            "--segment",
+            "-s",
+            help="Segment the background and repaint it as pixel-art tiles.",
+        ),
+    ] = False,
+    seg_model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--seg-model",
+            help="Path to a segmentation .onnx model (else auto-download+cache).",
+        ),
+    ] = None,
 ) -> None:
-    """Render a camera snapshot. Use --refresh N to stream it like a monitor."""
+    """Render a camera snapshot. Use --refresh N to stream it like a monitor.
+
+    Combine --detect and --segment for the full 'de-make': tiled background
+    regions with pixel-art vehicles stamped on top.
+    """
     interval = None if once else refresh
     detector = _build_detector(model, conf) if detect else None
+    segmenter = _build_segmenter(seg_model) if seg else None
     with _client() as client:
         try:
             if interval:
-                _stream(camera_id, interval, bits, client, detector)
+                _stream(camera_id, interval, bits, client, detector, segmenter)
             else:
                 cam = api.get_camera(camera_id, client)
                 img = api.download_image(cam.image_url, client)
-                _draw(cam, img, bits=bits, refresh=None, detector=detector)
+                _draw(
+                    cam,
+                    img,
+                    bits=bits,
+                    refresh=None,
+                    detector=detector,
+                    segmenter=segmenter,
+                )
         except TrafficAPIError as exc:
             _fatal(str(exc))
 
@@ -264,6 +354,7 @@ def _stream(
     bits: int,
     client: httpx.Client,
     detector: Detector | None = None,
+    segmenter: Segmenter | None = None,
 ) -> None:
     """Re-fetch + re-render on an interval until interrupted (Ctrl-C)."""
     try:
@@ -273,7 +364,14 @@ def _stream(
             # and the next frame simply fits the new dimensions.
             cam = api.get_camera(camera_id, client)
             img = api.download_image(cam.image_url, client)
-            _draw(cam, img, bits=bits, refresh=interval, detector=detector)
+            _draw(
+                cam,
+                img,
+                bits=bits,
+                refresh=interval,
+                detector=detector,
+                segmenter=segmenter,
+            )
             time.sleep(interval)
     except KeyboardInterrupt:
         console.print(

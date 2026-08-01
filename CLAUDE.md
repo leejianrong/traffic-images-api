@@ -13,6 +13,7 @@ uv run sgtraffic view 2702       # single snapshot
 uv run sgtraffic view 6710 -r 20 # live monitor, refresh every 20s
 uv run sgtraffic view 2701 --once --bits 3   # force one frame, chunkier retro
 uv run sgtraffic view 2705 --detect          # sprites + congestion score
+uv run sgtraffic view 2705 -d -s             # full de-make (tiles + sprites)
 uv run pytest                    # offline test suite (synthetic fixtures)
 ```
 
@@ -30,6 +31,8 @@ Data flows one way: `api` fetches → `cli` orchestrates → `render` converts.
 | `src/sgtraffic/detect.py` | Optional CV: YOLOv8n via ONNX Runtime → `Detection`s. Pure math (letterbox/NMS/postprocess) split from the runtime. All errors → `DetectionError`. |
 | `src/sgtraffic/sprites.py` | Code-defined pixel-art sprites (char grid + palette, no binary assets), stamped over the prepared buffer. |
 | `src/sgtraffic/congestion.py` | Pure: `Detection`s → 0–100 congestion score (count + occupancy). |
+| `src/sgtraffic/segment.py` | Optional CV: SegFormer (Cityscapes) via ONNX Runtime → per-pixel background class map. Pure math (preprocess/postprocess) split from the runtime. All errors → `SegmentationError`. Reuses `detect.download_model`. |
+| `src/sgtraffic/tiles.py` | Code-defined tileable background textures (char grid + palette, no binary assets), painted over segmented regions. |
 | `src/sgtraffic/cli.py` | Typer commands, interactive menu, auto-refresh loop. |
 
 ### The `--detect` pipeline (opt-in, off by default)
@@ -41,6 +44,16 @@ accuracy) → `sprites.stamp` onto the small buffer → `render.lines_from_image
 `onnxruntime` is imported lazily inside `Detector` so the pure helpers and tests
 load instantly. We use `onnxruntime` (MIT), **not** the AGPL `ultralytics`
 package — only the weights are YOLOv8, fetched at runtime and never committed.
+
+### The `--segment` pipeline (opt-in, off by default)
+`view --segment` inserts a *background* step: `render.prepare_frame` →
+`segment.Segmenter.segment` (per-pixel Cityscapes class map on the original
+bytes) → nearest-resize the label map to the small buffer → `segment.to_category_map`
+→ `tiles.paint` recolors road/sidewalk/building/greenery/sky regions → then the
+`--detect` sprites (if enabled) stamp on top → `render.lines_from_image`. Combine
+`-d -s` for the full de-make. Same optional/lazy/offline-testable discipline as
+detection; the segmentation model auto-downloads and is overridable via
+`--seg-model` / `SGTRAFFIC_SEG_MODEL[_URL]`.
 
 ## Quality (run before every commit)
 
