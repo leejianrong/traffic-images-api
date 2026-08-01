@@ -34,6 +34,21 @@ def yolo_output(
     return preds.T[np.newaxis, ...]  # -> (1, 84, anchors)
 
 
+def seg_logits(class_grid: list[list[int]], num_classes: int = 19):
+    """Craft a synthetic segmentation ``(1, C, h, w)`` logits tensor.
+
+    ``class_grid`` is an ``h x w`` grid of the class id that should win each
+    cell; that channel is set high so argmax selects it.
+    """
+    h = len(class_grid)
+    w = len(class_grid[0])
+    logits = np.zeros((1, num_classes, h, w), dtype=np.float32)
+    for y, row in enumerate(class_grid):
+        for x, cid in enumerate(row):
+            logits[0, cid, y, x] = 10.0
+    return logits
+
+
 @pytest.fixture
 def square_png() -> bytes:
     """A 640x640 image: letterboxing is identity (gain=1, pad=0)."""

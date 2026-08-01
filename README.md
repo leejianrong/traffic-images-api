@@ -14,6 +14,7 @@ uv run sgtraffic list               # list live cameras by expressway
 uv run sgtraffic view 2702          # single snapshot
 uv run sgtraffic view 6710 -r 20    # live monitor, refresh every 20s
 uv run sgtraffic view 2705 --detect # detect vehicles → pixel-art sprites + score
+uv run sgtraffic view 2705 -d -s    # full 'de-make': tiled background + sprites
 ```
 
 `python -m sgtraffic` works too.
@@ -48,6 +49,28 @@ uv run sgtraffic view 2705 --detect -r 20             # live analyzed monitor
 uv run sgtraffic view 2705 --detect --model yolo.onnx # bring your own model
 ```
 
+## Background 'de-make' (`--segment`)
+
+`--segment` (`-s`) goes a step further than sprites-over-photo: it runs semantic
+**segmentation** to label every background pixel (road, sidewalk, building,
+greenery, sky) and repaints each region with a matching **pixel-art tile** —
+turning the whole scene into an 8-bit reinterpretation. Combine with `--detect`
+for the full de-make: tiled background + vehicle sprites on top.
+
+- **Segmenter**: a small SegFormer-B0 (Cityscapes) model via ONNX Runtime,
+  same MIT-only dependency story as detection; weights fetched at runtime.
+- **Model file**: auto-downloads to `~/.cache/sgtraffic/` on first `--segment`
+  run. Override with `--seg-model /path.onnx` or `SGTRAFFIC_SEG_MODEL` /
+  `SGTRAFFIC_SEG_MODEL_URL`.
+- **Tiles**: code-defined in `tiles.py` (character grid + palette, no binary
+  assets), tiled seamlessly across each segmented region.
+
+```bash
+uv run sgtraffic view 2705 --segment          # tiled background only
+uv run sgtraffic view 2705 --detect --segment # full de-make (tiles + sprites)
+uv run sgtraffic view 2705 -d -s -r 20        # live de-make monitor
+```
+
 ## How the image engine works
 
 Each terminal cell renders **two vertical pixels** using the lower-half-block
@@ -72,6 +95,8 @@ is the bottom pixel. This doubles vertical resolution and keeps pixels square.
 | `detect.py`      | YOLOv8n via ONNX Runtime → vehicle/person detections      |
 | `sprites.py`     | code-defined pixel-art sprites, stamped over the photo    |
 | `congestion.py`  | count + occupancy → 0–100 congestion score               |
+| `segment.py`     | SegFormer via ONNX Runtime → per-pixel background classes  |
+| `tiles.py`       | code-defined tileable textures, painted over regions      |
 | `cli.py`         | Typer commands, interactive menu, auto-refresh loop       |
 
 ## Tests
