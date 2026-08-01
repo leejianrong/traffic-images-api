@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
+    "numpy>=2.5.1",
+    "onnxruntime>=1.28.0",
     "pillow>=12.3.0",
     "rich>=15.0.0",
     "typer>=0.26.8",
@@ -20,3 +22,8 @@ sgtraffic = "sgtraffic:main"
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
