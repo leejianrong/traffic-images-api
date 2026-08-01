@@ -21,6 +21,10 @@ jobs:
         with:
           version: "0.8.17"
           enable-cache: true
+      # ty resolves third-party imports (PIL/numpy/...) against the project
+      # environment, so the deps must be installed even for the type-check job.
+      - name: install (frozen)
+        run: uv sync --frozen
       - name: ruff (lint)
         run: uvx ruff@0.15.8 check src tests
       - name: ruff (format)
