@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import shutil
 from dataclasses import dataclass
+from typing import Any
 
 from PIL import Image, ImageEnhance, ImageOps
 
@@ -79,7 +80,9 @@ def terminal_spec(
     return RenderSpec(cols=cols, rows=rows)
 
 
-def _prepare(img: Image.Image, spec: RenderSpec, *, bits: int, punch: bool) -> Image.Image:
+def _prepare(
+    img: Image.Image, spec: RenderSpec, *, bits: int, punch: bool
+) -> Image.Image:
     """Downscale + apply the retro color treatment.
 
     ``bits`` = bits-per-channel kept (lower = chunkier retro banding; 8 = off).
@@ -92,7 +95,7 @@ def _prepare(img: Image.Image, spec: RenderSpec, *, bits: int, punch: bool) -> I
     img = img.resize((spec.cols, spec.rows * 2), Image.Resampling.BILINEAR)
 
     if punch:
-        img = ImageEnhance.Color(img).enhance(1.35)     # +35% saturation
+        img = ImageEnhance.Color(img).enhance(1.35)  # +35% saturation
         img = ImageEnhance.Contrast(img).enhance(1.12)  # +12% contrast
 
     if bits < 8:
@@ -116,26 +119,40 @@ class RenderResult:
     rows: int
 
 
-def render_result(
+def prepare_frame(
     image_bytes: bytes,
     *,
     max_cols: int = 120,
     bits: int = 4,
     punch: bool = True,
-) -> RenderResult:
-    """Convert raw image bytes into ANSI-colored rows + their dimensions.
+) -> tuple[Image.Image, tuple[int, int]]:
+    """Decode + downscale + retro-treat, returning the small ``RGB`` buffer.
 
-    Each returned line is already 0m-reset. Dimensions are derived from the
-    live terminal size, so the caller can print the lines and trust they fit
-    the current window (this is what keeps resizing graceful).
+    This is the half-way point of :func:`render_result`, exposed so callers can
+    stamp sprites onto the prepared buffer *before* it's flattened into
+    half-blocks (see the ``--detect`` path). Also returns the source image's
+    original ``(width, height)``, which detection needs to map boxes back.
     """
     with Image.open(io.BytesIO(image_bytes)) as src:
+        orig_wh = (src.width, src.height)
         aspect = (src.width / src.height) if src.height else (16 / 9)
         spec = terminal_spec(aspect, max_cols=max_cols)
         img = _prepare(src, spec, bits=bits, punch=punch)
+    return img, orig_wh
 
+
+def lines_from_image(img: Image.Image) -> RenderResult:
+    """Flatten a prepared ``RGB`` buffer into ANSI half-block rows.
+
+    ``img`` must already be sized to ``cols x (rows*2)`` pixels (as produced by
+    :func:`prepare_frame`). Kept separate from preparation so a sprite overlay
+    can slot in between the two steps.
+    """
     # Flat pixel list is far faster than per-pixel getpixel() calls.
-    px = img.load()
+    # Pillow's PixelAccess is loosely typed (indexing looks like it could return
+    # a scalar or None); we resized to RGB, so treat it as Any to keep the hot
+    # loop free of per-pixel casts.
+    px: Any = img.load()
     w, h = img.size
 
     lines: list[str] = []
@@ -162,11 +179,28 @@ def render_result(
     return RenderResult(lines=lines, cols=w, rows=len(lines))
 
 
+def render_result(
+    image_bytes: bytes,
+    *,
+    max_cols: int = 120,
+    bits: int = 4,
+    punch: bool = True,
+) -> RenderResult:
+    """Convert raw image bytes into ANSI-colored rows + their dimensions.
+
+    Each returned line is already 0m-reset. Dimensions are derived from the
+    live terminal size, so the caller can print the lines and trust they fit
+    the current window (this is what keeps resizing graceful).
+    """
+    img, _ = prepare_frame(image_bytes, max_cols=max_cols, bits=bits, punch=punch)
+    return lines_from_image(img)
+
+
 # --------------------------------------------------------------------------- #
 # Retro CRT-style framing (drawn directly, no Rich round-trip)
 # --------------------------------------------------------------------------- #
 # TrueColor border palette — neon cyan frame, phosphor-green accents.
-_FRAME = "\x1b[38;2;0;229;255m"   # neon cyan
+_FRAME = "\x1b[38;2;0;229;255m"  # neon cyan
 _ACCENT = "\x1b[38;2;57;255;20m"  # phosphor green
 _DIM = "\x1b[38;2;120;120;120m"
 
@@ -179,7 +213,26 @@ def _center(text: str, width: int) -> str:
     return " " * left + text + " " * (pad - left)
 
 
-def frame(result: RenderResult, *, title: str, subtitle: str = "") -> str:
+def _center_ansi(text: str, visible: int, width: int) -> str:
+    """Center a possibly-ANSI-laden ``text`` whose visible width is ``visible``.
+
+    We can't use ``len(text)`` here because color escapes inflate it; the caller
+    tells us the true on-screen width so the padding math stays correct.
+    """
+    if visible >= width:
+        return text
+    pad = width - visible
+    left = pad // 2
+    return " " * left + text + " " * (pad - left)
+
+
+def frame(
+    result: RenderResult,
+    *,
+    title: str,
+    subtitle: str = "",
+    gauge: tuple[str, int] | None = None,
+) -> str:
     """Wrap rendered art in a neon box with a title bar and status footer.
 
     Uses ``result.cols`` (known exactly) so no ANSI width-measurement is
@@ -196,6 +249,10 @@ def frame(result: RenderResult, *, title: str, subtitle: str = "") -> str:
     for ln in result.lines:
         # ln already ends in reset; border chars re-assert their own color.
         out.append(f"{_FRAME}║\x1b[0m{ln}{_FRAME}║\x1b[0m")
+    if gauge is not None:
+        text, visible = gauge
+        out.append(sep)
+        out.append(f"{_FRAME}║\x1b[0m{_center_ansi(text, visible, w)}{_FRAME}║\x1b[0m")
     if subtitle:
         out.append(sep)
         out.append(f"{_FRAME}║{_DIM}{_center(subtitle, w)}{_FRAME}║\x1b[0m")

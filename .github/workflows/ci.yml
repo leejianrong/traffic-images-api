@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# New pushes to the same ref cancel superseded runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap, no-infra checks — mirrored by the local pre-push hook.
+  quality:
+    name: lint + type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.17"
+          enable-cache: true
+      - name: ruff (lint)
+        run: uvx ruff@0.15.8 check src tests
+      - name: ruff (format)
+        run: uvx ruff@0.15.8 format --check src tests
+      - name: ty (type-check)
+        run: uvx ty@0.0.65 check src
+
+  test:
+    name: pytest (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.17"
+          enable-cache: true
+      - name: install (frozen)
+        run: uv sync --frozen
+      - name: pytest
+        run: uv run pytest -q
