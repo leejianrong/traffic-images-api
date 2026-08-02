@@ -58,10 +58,17 @@ detection; the segmentation model auto-downloads and is overridable via
 ## Quality (run before every commit)
 
 ```bash
-uvx ruff check src && uvx ruff format src   # lint + format
-uvx ty check src                            # type-check (strict typing everywhere)
-uv run pytest                               # offline tests (no model/network)
+uvx ruff@0.16.1 check src tests            # lint (src *and* tests)
+uvx ruff@0.16.1 format --check src tests   # format (drop --check to rewrite)
+uvx ty@0.0.65 check src                    # type-check (strict typing everywhere)
+uv run pytest                              # offline tests (no model/network)
 ```
+
+**Always pin the tool versions.** A bare `uvx ruff` floats to the latest
+release, which enables rules CI has never run — the local gate then fails on
+findings CI ignores (or, worse, passes on ones it won't). The pins above,
+`.githooks/pre-push`, and `.github/workflows/ci.yml` are kept in lockstep; when
+you bump one, bump all three in the same commit and fix the new findings.
 
 **Gates.** A pre-push hook (`.githooks/pre-push`) runs the cheap checks above
 before every push, mirroring the CI jobs in `.github/workflows/ci.yml`

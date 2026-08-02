@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import io
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 from PIL import Image

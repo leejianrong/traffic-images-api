@@ -3,12 +3,20 @@
 # tests) so a push rarely lands red. Everything here runs in-process with no
 # model and no network, matching .github/workflows/ci.yml.
 #
+# TOOL VERSIONS ARE PINNED IN LOCKSTEP WITH CI. A bare `uvx ruff` floats to the
+# newest release, which enables rules CI has never seen — the hook then blocks
+# pushes over findings CI does not care about. Keep the pins below identical to
+# the ones in .github/workflows/ci.yml and bump them together, in one commit.
+#
 # Enable once per clone:   git config core.hooksPath .githooks
 # Bypass for a rare case:  git push --no-verify
 set -e
 
-echo "▶ ruff check";        uvx ruff check src tests
-echo "▶ ruff format --check"; uvx ruff format --check src tests
-echo "▶ ty check";          uvx ty check src
-echo "▶ pytest";            uv run pytest -q
+RUFF_VERSION=0.16.1   # keep in sync with .github/workflows/ci.yml
+TY_VERSION=0.0.65     # keep in sync with .github/workflows/ci.yml
+
+echo "▶ ruff check";          uvx "ruff@${RUFF_VERSION}" check src tests
+echo "▶ ruff format --check"; uvx "ruff@${RUFF_VERSION}" format --check src tests
+echo "▶ ty check";            uvx "ty@${TY_VERSION}" check src
+echo "▶ pytest";              uv run pytest -q
 echo "✓ pre-push checks passed"

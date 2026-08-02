@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import itertools
 import time
-from typing import Annotated, Optional
+from typing import Annotated
 
 import httpx
 import numpy as np
@@ -26,7 +26,7 @@ from . import api, congestion, render, segment, sprites, tiles
 from .api import Camera, TrafficAPIError
 from .congestion import Congestion
 from .detect import Detection, DetectionError, Detector, resolve_model
-from .segment import Segmenter, SegmentationError
+from .segment import SegmentationError, Segmenter
 
 app = typer.Typer(
     name="sgtraffic",
@@ -200,8 +200,8 @@ def _stamp_detections(
         box = (
             max(0, int(x0 * scale_x)),
             max(0, int(y0 * scale_y)),
-            min(small_w, int(round(x1 * scale_x))),
-            min(small_h, int(round(y1 * scale_y))),
+            min(small_w, round(x1 * scale_x)),
+            min(small_h, round(y1 * scale_y)),
         )
         seed = int(x0) + int(y0)
         sprites.stamp(small, sprites.for_category(det.category, seed=seed), box)
@@ -271,7 +271,7 @@ def _draw(
 def view(
     camera_id: Annotated[str, typer.Argument(help="Camera ID, e.g. 2702 or 6710.")],
     refresh: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(
             "--refresh", "-r", help="Auto-refresh every N seconds (live monitor)."
         ),
@@ -294,7 +294,7 @@ def view(
         ),
     ] = False,
     model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--model", help="Path to a YOLOv8 .onnx model (else auto-download+cache)."
         ),
@@ -314,7 +314,7 @@ def view(
         ),
     ] = False,
     seg_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--seg-model",
             help="Path to a segmentation .onnx model (else auto-download+cache).",

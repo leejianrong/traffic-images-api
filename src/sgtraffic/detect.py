@@ -19,9 +19,9 @@ present. Only :class:`Detector` needs the actual runtime, imported lazily.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import httpx
 import numpy as np
@@ -91,7 +91,7 @@ def letterbox(
     canvas = np.full((new_size, new_size, 3), color, dtype=np.uint8)
     pad_w = (new_size - resized_w) / 2
     pad_h = (new_size - resized_h) / 2
-    top, left = int(round(pad_h - 0.1)), int(round(pad_w - 0.1))
+    top, left = round(pad_h - 0.1), round(pad_w - 0.1)
     canvas[top : top + resized_h, left : left + resized_w] = resized
     return canvas, gain, (pad_w, pad_h)
 
