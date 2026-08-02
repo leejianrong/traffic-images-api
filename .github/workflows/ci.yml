@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The integration job below is the reason for these two: it must be runnable
+  # on demand, and it should notice a dead model mirror before a user does.
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
 
 # New pushes to the same ref cancel superseded runs.
 concurrency:
@@ -50,3 +55,37 @@ jobs:
         run: uv sync --frozen
       - name: pytest
         run: uv run pytest -q
+
+  # The heavy layer: downloads ~28 MB of real ONNX weights and talks to the live
+  # Data.gov.sg camera API. Deliberately NOT a gate on `quality` or `test` —
+  # those stay fast and required, and a PR must never go red because Hugging
+  # Face was having a bad afternoon.
+  #
+  # It runs on the weekly schedule and on manual dispatch (not on every PR), and
+  # `continue-on-error` keeps even a scheduled run advisory: read the job's
+  # summary, don't let it block anything. What it is really for is catching the
+  # slow rot the offline suite is blind to — a model mirror going 401, an
+  # upstream re-export changing tensor shapes, the API changing payload shape.
+  integration:
+    name: pytest (integration, real models + live API)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.17"
+          enable-cache: true
+      - name: install (frozen)
+        run: uv sync --frozen
+      # Cache the weights between runs so a HF outage doesn't automatically mean
+      # a skipped suite -- and so the scheduled run is not a fresh 28 MB pull.
+      - name: cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sgtraffic
+          key: sgtraffic-models-v1
+      - name: pytest (integration)
+        run: uv run pytest -m integration -q -rs

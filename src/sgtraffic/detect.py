@@ -19,7 +19,7 @@ present. Only :class:`Detector` needs the actual runtime, imported lazily.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,9 +41,23 @@ _COCO_MAP: dict[int, tuple[str, bool]] = {
 }
 
 # Model download + cache configuration (all overridable by env).
-_DEFAULT_MODEL_URL = os.environ.get(
-    "SGTRAFFIC_MODEL_URL",
-    "https://huggingface.co/Xenova/yolov8n/resolve/main/onnx/model.onnx",
+#
+# A *list*, not a single URL, and deliberately so: the original hard-coded
+# default (``Xenova/yolov8n``) went away and started answering 401, which killed
+# ``--detect`` outright for everyone with a cold cache. Community model mirrors
+# disappear; we try each in turn and only fail once every one of them is gone.
+# Both entries below are stock COCO YOLOv8n exports: input ``images``
+# (1, 3, 640, 640) float32, output (1, 84, 8400) -- exactly what
+# :func:`postprocess` decodes.
+DEFAULT_MODEL_URLS: tuple[str, ...] = (
+    "https://huggingface.co/salim4n/yolov8n-detect-onnx/resolve/main/yolov8n-onnx-web/yolov8n.onnx",
+    "https://huggingface.co/inference4j/yolov8n/resolve/main/model.onnx",
+)
+# $SGTRAFFIC_MODEL_URL pins a single source and wins over the built-in list.
+_MODEL_URLS: tuple[str, ...] = (
+    (_env_url,)
+    if (_env_url := os.environ.get("SGTRAFFIC_MODEL_URL"))
+    else DEFAULT_MODEL_URLS
 )
 _CACHE_DIR = Path(
     os.environ.get("SGTRAFFIC_CACHE", Path.home() / ".cache" / "sgtraffic")
@@ -212,8 +226,9 @@ def resolve_model(
     """Locate the ONNX model, downloading + caching it on first use.
 
     Resolution order: ``explicit`` arg -> ``$SGTRAFFIC_MODEL`` -> cached file ->
-    download from :data:`_DEFAULT_MODEL_URL`. Raises :class:`DetectionError`
-    with actionable guidance if it can't be found or fetched.
+    download from the first reachable of :data:`DEFAULT_MODEL_URLS`. Raises
+    :class:`DetectionError` with actionable guidance if it can't be found or
+    fetched.
     """
     for candidate in (explicit, os.environ.get("SGTRAFFIC_MODEL")):
         if candidate:
@@ -230,7 +245,39 @@ def resolve_model(
             f"No model at {cached} and downloads are disabled. "
             "Pass --model /path/to.onnx or set $SGTRAFFIC_MODEL."
         )
-    return download_model(_DEFAULT_MODEL_URL, cached, on_progress=on_progress)
+    try:
+        return download_first(_MODEL_URLS, cached, on_progress=on_progress)
+    except DetectionError as exc:
+        raise DetectionError(
+            f"{exc}\nSet $SGTRAFFIC_MODEL_URL to a reachable yolov8n.onnx, or pass "
+            "--model /path/to.onnx (export one with ultralytics: "
+            "YOLO('yolov8n.pt').export(format='onnx'))."
+        ) from exc
+
+
+def download_first(
+    urls: Sequence[str],
+    dest: Path,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Try each URL in order, returning the first that downloads successfully.
+
+    Mirrors are not forever: a repo goes private or is deleted and every cold
+    cache breaks at once. Only when *all* of them fail do we raise, quoting each
+    failure so the user can see whether it's the network or the hosts. The
+    remediation advice is left to the caller — this helper serves both the
+    detection and the segmentation model, which need different hints.
+    """
+    failures: list[str] = []
+    for url in urls:
+        try:
+            return download_model(url, dest, on_progress=on_progress)
+        except DetectionError as exc:
+            failures.append(f"  • {exc}")
+    raise DetectionError(
+        "Could not download a model from any known source:\n" + "\n".join(failures)
+    )
 
 
 def download_model(
@@ -253,12 +300,10 @@ def download_model(
         tmp.replace(dest)
     except httpx.HTTPError as exc:
         tmp.unlink(missing_ok=True)
-        raise DetectionError(
-            f"Could not download model from {url}: {exc}\n"
-            "Set $SGTRAFFIC_MODEL_URL to a reachable yolov8n.onnx, or pass "
-            "--model /path/to.onnx (export one with ultralytics: "
-            "YOLO('yolov8n.pt').export(format='onnx'))."
-        ) from exc
+        # One line, no remediation advice: the callers (download_first and
+        # segment.resolve_model) aggregate these and append their own guidance.
+        reason = str(exc).splitlines()[0] or type(exc).__name__
+        raise DetectionError(f"Could not download model from {url}: {reason}") from exc
     return dest
 
 

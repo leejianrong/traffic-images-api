@@ -101,6 +101,25 @@ is the bottom pixel. This doubles vertical resolution and keeps pixels square.
 
 ## Tests
 
+Two layers, split by cost.
+
 ```bash
-uv run pytest        # offline: no model or network needed (synthetic fixtures)
+uv run pytest                  # fast: offline, no model, no network (~0.3s)
+uv run pytest -m integration   # heavy: real ONNX weights + live camera API
 ```
+
+The fast layer is the default and the only thing the pre-push hook runs. It uses
+synthetic images, synthetic tensors and a fake ONNX session, so it proves the
+maths but can say nothing about the real models.
+
+The heavy layer lives in `tests/integration/` and is deselected unless you ask
+for it. It downloads the actual weights into `~/.cache/sgtraffic/`, builds real
+ONNX Runtime sessions, checks the real tensor shapes, and runs a live camera
+frame through the full `--detect` / `--segment` pipelines. It also asserts every
+built-in model URL still resolves — the failure that motivated the layer was
+both default download URLs quietly turning into `401 Unauthorized`. Anything it
+needs and cannot reach (a dead mirror, no internet, the API being down) makes it
+**skip**, not fail, so the suite stays runnable offline.
+
+In CI it is a separate advisory job that runs weekly and on manual dispatch; it
+never gates a pull request.
