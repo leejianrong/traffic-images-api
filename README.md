@@ -123,3 +123,9 @@ needs and cannot reach (a dead mirror, no internet, the API being down) makes it
 
 In CI it is a separate advisory job that runs weekly and on manual dispatch; it
 never gates a pull request.
+
+## Design decisions
+
+The choices that look arbitrary until you know why — ONNX Runtime instead of
+`ultralytics`, printing the raster raw instead of through Rich, the two test
+layers — are written up as short ADRs in [`docs/adr/`](docs/adr/README.md).

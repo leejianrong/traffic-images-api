@@ -1,0 +1,53 @@
+# Dependabot: weekly, grouped, low-noise.
+#
+# WHAT THIS DOES NOT COVER — read before assuming you are patched:
+#
+#   * `uvx ruff@0.16.1` / `uvx ty@0.0.65` in .github/workflows/ci.yml and
+#     .githooks/pre-push. These are tool versions pinned inside run-steps, not
+#     declared dependencies, so Dependabot cannot see them. They move in
+#     lockstep (CI + hook in the same commit) and must be bumped **by hand** —
+#     see the "Always pin the tool versions" note in CLAUDE.md.
+#   * The `version: "0.8.17"` input to astral-sh/setup-uv, and the pinned
+#     `pip-audit` in the audit job. Same reason: a string in a step, not a
+#     dependency. Also by hand.
+#   * The ONNX model weights fetched at runtime. Not a package at all; their
+#     rot is watched by the advisory `integration` job instead.
+#
+# Dependabot bumps the actions themselves (`actions/checkout@v4`, ...) and the
+# Python dependency graph (pyproject.toml + uv.lock, kept in sync for you).
+version: 2
+updates:
+  # Python deps. The `uv` ecosystem reads pyproject.toml and updates uv.lock in
+  # the same PR, so `uv sync --frozen` in CI keeps working.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Asia/Singapore"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR a week for the routine churn; majors still arrive on their own
+      # so a breaking Pillow/numpy bump is reviewed in isolation.
+      python-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Workflow action pins.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Asia/Singapore"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      # A handful of actions across one workflow — never worth more than one PR.
+      github-actions:
+        patterns: ["*"]
