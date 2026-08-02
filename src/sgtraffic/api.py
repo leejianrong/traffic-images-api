@@ -73,19 +73,29 @@ def _parse(payload: dict) -> list[Camera]:
 
     cameras: list[Camera] = []
     for c in cameras_raw:
-        meta = c.get("image_metadata") or {}
-        loc = c.get("location") or {}
-        cameras.append(
-            Camera(
-                camera_id=str(c["camera_id"]),
-                image_url=c["image"],
-                timestamp=c.get("timestamp", ""),
-                latitude=float(loc.get("latitude", 0.0)),
-                longitude=float(loc.get("longitude", 0.0)),
-                width=int(meta.get("width", 0)),
-                height=int(meta.get("height", 0)),
+        # Guard the whole entry, not just the envelope above: a single camera
+        # missing "camera_id"/"image", or carrying a null/non-numeric latitude,
+        # would otherwise escape as a raw KeyError/TypeError/ValueError and slip
+        # past every `except TrafficAPIError` handler in the CLI.
+        try:
+            meta = c.get("image_metadata") or {}
+            loc = c.get("location") or {}
+            cameras.append(
+                Camera(
+                    camera_id=str(c["camera_id"]),
+                    image_url=c["image"],
+                    timestamp=c.get("timestamp", ""),
+                    latitude=float(loc.get("latitude") or 0.0),
+                    longitude=float(loc.get("longitude") or 0.0),
+                    width=int(meta.get("width") or 0),
+                    height=int(meta.get("height") or 0),
+                )
             )
-        )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            ident = c.get("camera_id", "<unknown>") if isinstance(c, dict) else c
+            raise TrafficAPIError(
+                f"Unexpected camera entry for {ident!r}: {exc}"
+            ) from exc
     # Stable ordering: group by expressway, then id, so menus are predictable.
     cameras.sort(key=lambda cam: (cam.expressway, cam.camera_id))
     return cameras
