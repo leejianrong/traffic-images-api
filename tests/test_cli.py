@@ -6,10 +6,13 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pytest
+import typer
 from conftest import make_png
 from PIL import Image
 
 from sgtraffic import cli, render
+from sgtraffic.api import Camera
 from sgtraffic.congestion import Congestion
 from sgtraffic.detect import Detection
 
@@ -123,3 +126,52 @@ def test_paint_background_matches_buffer_size(monkeypatch):
     cli._paint_background(png, small, _FakeSegmenter(class_id=10))  # sky
     # Buffer got repainted to sky tones (not the original solid grey).
     assert small.size[0] > 0
+
+
+# --------------------------------------------------------------------------- #
+# `demo` -- the single command a newcomer runs
+# --------------------------------------------------------------------------- #
+def test_demo_picks_a_live_camera_and_renders(monkeypatch):
+    """`demo` exists so nobody has to look up a camera id that may be offline.
+
+    The whole point is that it takes no arguments, so the thing worth pinning
+    is that it sources its own camera and still reaches the renderer.
+    """
+    cam = Camera(
+        camera_id="2701",
+        image_url="https://images.data.gov.sg/2701.jpg",
+        timestamp="2026-08-02T11:20:53+08:00",
+        latitude=1.29,
+        longitude=103.85,
+        width=1920,
+        height=1080,
+    )
+    drawn: list[Camera] = []
+    monkeypatch.setattr(cli.api, "fetch_cameras", lambda _client: [cam])
+    monkeypatch.setattr(
+        cli.api, "download_image", lambda _url, _client: make_png(64, 36)
+    )
+    monkeypatch.setattr(cli, "_build_detector", lambda _m, _c: _FakeDetector([]))
+    monkeypatch.setattr(cli, "_build_segmenter", lambda _m: _FakeSegmenter(0))
+    monkeypatch.setattr(cli, "_draw", lambda c, _img, **_kw: drawn.append(c))
+
+    cli.demo(once=True)
+
+    assert [c.camera_id for c in drawn] == ["2701"]
+
+
+def test_demo_fails_before_downloading_a_model_when_no_camera_is_live(monkeypatch):
+    """An API outage must not cost the user a 28 MB download first."""
+    built: list[str] = []
+    monkeypatch.setattr(cli.api, "fetch_cameras", lambda _client: [])
+    monkeypatch.setattr(
+        cli, "_build_detector", lambda _m, _c: built.append("detector") or None
+    )
+    monkeypatch.setattr(
+        cli, "_build_segmenter", lambda _m: built.append("segmenter") or None
+    )
+
+    with pytest.raises(typer.Exit):
+        cli.demo(once=True)
+
+    assert built == []

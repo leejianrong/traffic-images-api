@@ -1,4 +1,4 @@
-# 0003 — Two test layers: fast/offline by default, integration opt-in
+# 0003: Two test layers: fast/offline by default, integration opt-in
 
 **Status:** Accepted · **Date:** 2026-08-02
 
@@ -26,9 +26,9 @@ the developer learns `--no-verify`, and the hook stops being a gate at all.
 Two layers, split by cost, in one repo.
 
 The fast layer is `tests/*.py`: synthetic images, synthetic tensors, a fake
-ONNX session, no model and no network. It is the default —
-`addopts = "-m 'not integration'"` in `pyproject.toml` deselects everything
-else — and it is what the pre-push hook and the required CI jobs run. 128 tests
+ONNX session, no model and no network. It is the default
+(`addopts = "-m 'not integration'"` in `pyproject.toml` deselects everything
+else), and it is what the pre-push hook and the required CI jobs run. 150 tests
 in well under a second.
 
 The heavy layer is `tests/integration/`, marked `integration` and run only when
@@ -42,15 +42,15 @@ dispatch, with `continue-on-error: true`. It never gates a pull request.
 
 ## Consequences
 
-The fast layer must stay infra-free forever. Not "usually offline" — a single
+The fast layer must stay infra-free forever. Not "usually offline": a single
 network call in `tests/*.py` re-couples every push to someone else's uptime,
 and the sub-second runtime is the only reason the hook is tolerable in the
 first place. New tests that need a model or the API go in `tests/integration/`,
 no exceptions.
 
 Deselection happens after collection, so pytest still *imports* every
-integration module on a default run. Those modules must keep imports cheap —
-`onnxruntime` is loaded inside fixtures, not at module scope — or the fast
+integration module on a default run. Those modules must keep imports cheap
+(`onnxruntime` is loaded inside fixtures, not at module scope), or the fast
 layer pays for the heavy one anyway.
 
 Skip-don't-fail means a genuinely broken mirror looks the same as no internet.
