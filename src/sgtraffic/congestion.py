@@ -78,7 +78,7 @@ def score(detections: list[Detection], frame_wh: tuple[int, int]) -> Congestion:
     count_component = min(1.0, vehicles / _N_REF)
     occ_component = min(1.0, occupancy / _OCC_REF)
     raw = 100.0 * (_COUNT_WEIGHT * count_component + _OCC_WEIGHT * occ_component)
-    final = int(round(raw))
+    final = round(raw)
 
     return Congestion(
         score=final,

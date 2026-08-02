@@ -11,8 +11,8 @@ from conftest import make_png, seg_logits
 
 from sgtraffic import segment
 from sgtraffic.segment import (
-    Segmenter,
     SegmentationError,
+    Segmenter,
     postprocess,
     preprocess,
     resolve_model,
