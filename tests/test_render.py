@@ -16,6 +16,9 @@ from sgtraffic import render
 # Matches one emitted cell prefix: background = top pixel, foreground = bottom.
 SGR = re.compile(r"\x1b\[48;2;(\d+);(\d+);(\d+);38;2;(\d+);(\d+);(\d+)m")
 
+# Any SGR sequence -- used to measure a line's *visible* width.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 
@@ -28,6 +31,39 @@ def _sgr_count(text: str) -> int:
 def _escape_count(text: str) -> int:
     """Every escape sequence, colors *and* resets."""
     return text.count("\x1b[")
+
+
+def _visible_width(line: str) -> int:
+    """On-screen width of an ANSI-laden line (every glyph here is 1 cell wide)."""
+    return len(ANSI.sub("", line))
+
+
+def _fake_term(monkeypatch, cols: int, rows: int) -> None:
+    """Force an exact terminal size.
+
+    Blunter than COLUMNS/LINES on purpose: ``shutil.get_terminal_size`` treats a
+    non-positive env value as "unset" and silently substitutes the real window,
+    which would quietly neuter the degenerate cases below.
+    """
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda fallback=(80, 24): (cols, rows)
+    )
+
+
+def _assert_fits_terminal(
+    spec: render.RenderSpec, term_cols: int, term_rows: int, ctx: object
+) -> None:
+    """The promise in ``terminal_spec``'s docstring, as an assertion.
+
+    Art plus chrome must fit the window. Below that the budget is allowed to
+    collapse -- but only to 1, never to 0 (which would resize to an empty image)
+    and never *upward* past what the window can hold (which would wrap and shear
+    every row of the frame).
+    """
+    assert spec.cols >= 1, ctx
+    assert spec.rows >= 1, ctx
+    assert spec.cols <= max(1, term_cols - render._H_CHROME), ctx
+    assert spec.rows <= max(1, term_rows - render._V_CHROME), ctx
 
 
 def _checker(width: int, height: int) -> Image.Image:
@@ -105,16 +141,93 @@ def test_terminal_spec_clamps_by_height_for_tall_sources(monkeypatch):
     assert spec.cols < 100 - render._H_CHROME  # width gave way, not the height
 
 
-def test_terminal_spec_never_returns_nonpositive_dimensions(monkeypatch):
-    # A zero/negative dimension would later resize to an empty image and crash
-    # the renderer, so every hostile window/aspect pair must still be drawable.
-    for cols, rows in (("1", "1"), ("0", "0"), ("6", "3"), ("10000", "10000")):
+def test_terminal_spec_never_overflows_a_hostile_window(monkeypatch):
+    # A zero/negative dimension would resize to an empty image and crash the
+    # renderer; an *over*-sized one wraps, and one wrapped line shears every row
+    # under it. Every hostile window/aspect pair must satisfy both bounds.
+    for cols, rows in (
+        (1, 1),
+        (0, 0),
+        (6, 3),
+        (12, 10),  # the window that used to yield 10 cols of art in 12
+        (14, 9),  # exactly _H_CHROME + the old 10-col floor
+        (40, 8),  # shorter than _V_CHROME
+        (10000, 10000),
+    ):
+        _fake_term(monkeypatch, cols, rows)
         for aspect in (0.01, 0.1, 1.0, 16 / 9, 100.0):
-            monkeypatch.setenv("COLUMNS", cols)
-            monkeypatch.setenv("LINES", rows)
             spec = render.terminal_spec(aspect)
-            assert spec.cols >= 1, (cols, rows, aspect)
-            assert spec.rows >= 1, (cols, rows, aspect)
+            _assert_fits_terminal(spec, cols, rows, (cols, rows, aspect))
+
+
+def test_terminal_spec_shrinks_below_the_old_floor_in_a_narrow_window(monkeypatch):
+    # 12 columns cannot hold 10 columns of art plus 4 of chrome. Shrinking wins:
+    # a 8-column picture is ugly, a wrapped 14-column one is corrupt.
+    monkeypatch.setenv("COLUMNS", "12")
+    monkeypatch.setenv("LINES", "10")
+    spec = render.terminal_spec(16 / 9)
+    assert spec.cols == 12 - render._H_CHROME == 8
+    assert spec.cols + render._H_CHROME <= 12
+    assert spec.rows + render._V_CHROME <= 10
+
+
+def test_terminal_spec_shrinks_below_the_old_floor_in_a_short_window(monkeypatch):
+    # Same story vertically: 9 rows leaves 1 row of art after chrome, not 5.
+    monkeypatch.setenv("COLUMNS", "120")
+    monkeypatch.setenv("LINES", "9")
+    spec = render.terminal_spec(16 / 9)
+    assert spec.rows == 1
+    assert spec.rows + render._V_CHROME <= 9
+    # Width had to give way to keep the aspect ratio at one row of art.
+    assert spec.cols == round(1 * 2 * (16 / 9))
+
+
+def test_terminal_spec_row_budget_is_the_frame_chrome_it_promises(monkeypatch):
+    # _V_CHROME must cover the fattest frame() draws (border, title, separators,
+    # gauge and subtitle), or the row budget is a lie.
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    result = render.render_result(make_png(320, 240))
+    framed = render.frame(
+        result, title="t", subtitle="s", gauge=("gauge", len("gauge"))
+    )
+    assert len(framed.splitlines()) == result.rows + render._V_CHROME
+
+
+def _draw_like_the_cli(result: render.RenderResult) -> str:
+    """Frame a result the way ``cli._draw`` does, gauge and subtitle included."""
+    gauge_text = "CONGESTION 100% JAM"[: result.cols]  # the CLI truncates too
+    return render.frame(
+        result,
+        title="a very long camera name that cannot possibly fit",
+        subtitle="cam 2702 · 2026-01-01 00:00:00 SGT · refresh 20s",
+        gauge=(gauge_text, len(gauge_text)),
+    )
+
+
+def test_whole_render_path_fits_a_tiny_terminal(monkeypatch):
+    # End to end, not just the sizing math: art + border + title + gauge +
+    # subtitle must all stay inside the window at hostile sizes.
+    for cols, rows in ((12, 10), (14, 9), (20, 12), (5, 40), (9, 11)):
+        _fake_term(monkeypatch, cols, rows)
+        result = render.render_result(make_png(320, 240))
+        lines = _draw_like_the_cli(result).splitlines()
+        assert len(lines) <= rows, (cols, rows, len(lines))
+        for line in lines:
+            assert _visible_width(line) <= cols, (cols, rows, repr(line))
+
+
+def test_whole_render_path_survives_an_absurdly_small_terminal(monkeypatch):
+    # Below _V_CHROME + 1 rows the *frame* itself no longer fits -- nothing can
+    # fix that -- but the picture must still be drawn, still fit horizontally,
+    # and never raise (a 0-px resize used to be the failure mode here).
+    for cols, rows in ((6, 6), (3, 2), (1, 1), (0, 0)):
+        _fake_term(monkeypatch, cols, rows)
+        result = render.render_result(make_png(320, 240))
+        assert result.cols >= 1 and result.rows >= 1, (cols, rows)
+        assert result.cols <= max(1, cols - render._H_CHROME), (cols, rows)
+        for line in _draw_like_the_cli(result).splitlines():
+            assert _visible_width(line) <= max(cols, result.cols + render._H_CHROME)
 
 
 def test_terminal_spec_uses_fallback_size_when_terminal_unknown(monkeypatch):

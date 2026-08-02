@@ -56,6 +56,63 @@ jobs:
       - name: pytest
         run: uv run pytest -q
 
+  # Dependency vulnerability scan over the *locked* set (uv.lock -> a fully
+  # hashed requirements file -> pip-audit against the PyPI advisory database).
+  # Runs in parallel with quality/test and shares nothing with them, so it
+  # cannot slow the required jobs down.
+  #
+  # ADVISORY, NOT A GATE — deliberate. The scan reports on transitive pins we do
+  # not choose (onnxruntime -> protobuf/flatbuffers, httpx -> anyio/certifi ...),
+  # and an advisory with no fixed release yet would then block every unrelated
+  # PR in the repo until someone adds an ignore. That teaches people that red is
+  # normal, which costs more than the scan buys. The fix path here is a
+  # Dependabot PR (see .github/dependabot.yml, same weekly cadence), and *that*
+  # PR is gated by quality + test in the normal way.
+  #
+  # The counter-risk — a scanner nobody reads — is handled by making it loud
+  # where people already look: it runs on every push and PR, and always writes
+  # its findings into the job summary, so a finding is one click from the PR's
+  # checks tab rather than buried in a log. If this repo ever ships something
+  # that handles untrusted input, promote it to a gate with an explicit ignore
+  # list; today it is a 6-dependency CLI that renders public webcam JPEGs.
+  audit:
+    name: pip-audit (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.17"
+          enable-cache: true
+      # Export what the lockfile actually resolves to — runtime *and* dev groups,
+      # with hashes, which is what lets pip-audit skip resolution entirely
+      # (--disable-pip) and audit exactly the versions CI installs.
+      - name: export the locked dependency set
+        run: |
+          uv export --frozen --all-groups --no-emit-project \
+            --format requirements-txt -o requirements-audit.txt
+      # Pinned like every other tool here: a floating scanner changes its own
+      # CLI and output format, not its advisory data (that lives server-side).
+      - name: pip-audit
+        run: |
+          uvx pip-audit@2.10.1 -r requirements-audit.txt \
+            --disable-pip --progress-spinner off \
+            --format markdown --output audit.md
+      # pip-audit exits 1 and writes audit.md only when it finds something.
+      - name: publish findings to the job summary
+        if: always()
+        run: |
+          if [ -s audit.md ]; then
+            echo "## pip-audit: known vulnerabilities in the locked deps" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat audit.md >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Advisory only — this job never blocks a merge. Fix via the Dependabot PR, or bump the pin by hand._" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## pip-audit: no known vulnerabilities in the locked deps" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # The heavy layer: downloads ~28 MB of real ONNX weights and talks to the live
   # Data.gov.sg camera API. Deliberately NOT a gate on `quality` or `test` —
   # those stay fast and required, and a PR must never go red because Hugging

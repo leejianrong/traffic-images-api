@@ -58,13 +58,21 @@ def terminal_spec(
     this is what makes terminal resizing graceful: we never emit a line wider
     than the terminal, so lines never wrap and the picture never shears.
 
+    In a window too small to hold even a minimal picture plus its chrome, the
+    budget is allowed to collapse all the way to a single cell. A 6-column
+    picture is ugly but honest; a picture clamped up to a "readable" minimum
+    would wrap, and a wrapped line shears every row below it and corrupts the
+    whole frame. The only hard floor is 1 -- a zero dimension would resize to
+    an empty image and crash the renderer.
+
     ``aspect`` is the source image's width / height.
     """
     term_cols, term_rows = shutil.get_terminal_size(fallback)
 
-    # Usable budget after leaving room for borders/header/footer.
-    avail_cols = max(10, min(term_cols - _H_CHROME, max_cols))
-    avail_rows = max(5, term_rows - _V_CHROME)
+    # Usable budget after leaving room for borders/header/footer. Never clamp
+    # *upward*: whatever is left after chrome is all we are allowed to draw.
+    avail_cols = max(1, min(term_cols - _H_CHROME, max_cols))
+    avail_rows = max(1, term_rows - _V_CHROME)
 
     # Each cell is 1 source-pixel wide and 2 source-pixels tall, so a cell's
     # on-screen shape is ~1:2 (w:h). To preserve the source aspect ratio:
@@ -75,7 +83,8 @@ def terminal_spec(
     # If that's too tall for the window, clamp by height and back-solve cols.
     if rows > avail_rows:
         rows = avail_rows
-        cols = max(1, round(rows * 2 * aspect))
+        # Rounding back up must never re-breach the width budget.
+        cols = min(avail_cols, max(1, round(rows * 2 * aspect)))
 
     return RenderSpec(cols=cols, rows=rows)
 
