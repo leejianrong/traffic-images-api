@@ -28,7 +28,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .detect import download_first
+from .detect import (
+    ModelIntegrityError,
+    ModelSource,
+    download_first,
+    trusted_digests,
+    verify_cached,
+)
 
 # Cityscapes trainId -> our coarse background category (None = leave the photo).
 CITYSCAPES_TO_CATEGORY: dict[int, str] = {
@@ -42,20 +48,24 @@ CITYSCAPES_TO_CATEGORY: dict[int, str] = {
     10: "sky",
 }
 
-# Like :data:`detect.DEFAULT_MODEL_URLS`, a list rather than one URL: the
+# Like :data:`detect.DEFAULT_MODEL_SOURCES`, a list rather than one URL: the
 # original default (``onnx-community/segformer-b0-...``) now answers 401, which
 # broke ``--segment`` on every cold cache. Each entry is a SegFormer-B0 export
 # fine-tuned on Cityscapes whose 19 output channels follow the trainId order
-# assumed by :data:`CITYSCAPES_TO_CATEGORY`.
-DEFAULT_SEG_MODEL_URLS: tuple[str, ...] = (
-    "https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-1024-1024/resolve/main/onnx/model.onnx",
-    "https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/resolve/main/onnx/model.onnx",
-)
-# $SGTRAFFIC_SEG_MODEL_URL pins a single source and wins over the built-in list.
-_SEG_URLS: tuple[str, ...] = (
-    (_env_url,)
-    if (_env_url := os.environ.get("SGTRAFFIC_SEG_MODEL_URL"))
-    else DEFAULT_SEG_MODEL_URLS
+# assumed by :data:`CITYSCAPES_TO_CATEGORY`, pinned to an immutable revision and
+# to the SHA-256 of the bytes at that revision.
+#
+# Both are by Xenova (transformers.js), which is why neither was demoted the way
+# the detection mirrors were: unlike those, this is a known author.
+DEFAULT_SEG_MODEL_SOURCES: tuple[ModelSource, ...] = (
+    ModelSource(
+        url="https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-1024-1024/resolve/64e537ca2bf6bf2afc13727ee6bb61cfca9e1048/onnx/model.onnx",
+        sha256="142427caa45a47d57d5bd23b62c3bfc852fa7df0c6c2291c5ef34f581fa406bf",
+    ),
+    ModelSource(
+        url="https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/resolve/18b12204d4c787afb8df24e49efc36a20d9f16d0/onnx/model.onnx",
+        sha256="ffd5ceb33f7c7a969bc69d3ad7ab06017de15c42085e7ed10be8ed8d23b10fec",
+    ),
 )
 _CACHE_DIR = Path(
     os.environ.get("SGTRAFFIC_CACHE", Path.home() / ".cache" / "sgtraffic")
@@ -120,13 +130,31 @@ def to_category_map(
 # --------------------------------------------------------------------------- #
 # Model acquisition (mirrors detect.resolve_model, seg-specific defaults)
 # --------------------------------------------------------------------------- #
+def configured_sources() -> tuple[ModelSource, ...]:
+    """The segmentation sources to use, honouring ``$SGTRAFFIC_SEG_MODEL_URL``.
+
+    As in :func:`detect.configured_sources`, a user-set URL replaces the built-in
+    list *and* disables checksum verification — those are someone else's weights
+    by request, so our digest has no authority over them.
+    """
+    override = os.environ.get("SGTRAFFIC_SEG_MODEL_URL")
+    if override:
+        return (ModelSource.unverified(override),)
+    return DEFAULT_SEG_MODEL_SOURCES
+
+
 def resolve_model(
     explicit: str | None = None,
     *,
     allow_download: bool = True,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Path:
-    """Locate the segmentation ONNX model, downloading + caching on first use."""
+    """Locate the segmentation ONNX model, downloading + caching on first use.
+
+    Integrity failures surface as a :class:`SegmentationError` too — never a
+    ``DetectionError`` — but keep the "this is not the network" wording, since a
+    mismatched digest and an unreachable mirror need opposite reactions.
+    """
     for candidate in (explicit, os.environ.get("SGTRAFFIC_SEG_MODEL")):
         if candidate:
             path = Path(candidate).expanduser()
@@ -134,19 +162,23 @@ def resolve_model(
                 raise SegmentationError(f"Segmentation model not found: {path}")
             return path
 
+    sources = configured_sources()
     cached = _CACHE_DIR / _SEG_FILENAME
     if cached.is_file():
-        return cached
+        try:
+            return verify_cached(cached, trusted_digests(sources))
+        except ModelIntegrityError as exc:
+            raise SegmentationError(f"Segmentation model: {exc}") from exc
     if not allow_download:
         raise SegmentationError(
             f"No model at {cached} and downloads are disabled. "
             "Pass --seg-model /path/to.onnx or set $SGTRAFFIC_SEG_MODEL."
         )
     try:
-        return download_first(_SEG_URLS, cached, on_progress=on_progress)
+        return download_first(sources, cached, on_progress=on_progress)
     except Exception as exc:  # download_first raises DetectionError on failure
         raise SegmentationError(
-            f"Could not download segmentation model: {exc}\n"
+            f"Could not obtain a verified segmentation model: {exc}\n"
             "Set $SGTRAFFIC_SEG_MODEL_URL to a reachable Cityscapes .onnx, or pass "
             "--seg-model /path/to.onnx."
         ) from exc

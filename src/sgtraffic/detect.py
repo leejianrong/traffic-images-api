@@ -18,8 +18,9 @@ present. Only :class:`Detector` needs the actual runtime, imported lazily.
 
 from __future__ import annotations
 
+import hashlib
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,25 +41,6 @@ _COCO_MAP: dict[int, tuple[str, bool]] = {
     7: ("bus_truck", True),  # truck
 }
 
-# Model download + cache configuration (all overridable by env).
-#
-# A *list*, not a single URL, and deliberately so: the original hard-coded
-# default (``Xenova/yolov8n``) went away and started answering 401, which killed
-# ``--detect`` outright for everyone with a cold cache. Community model mirrors
-# disappear; we try each in turn and only fail once every one of them is gone.
-# Both entries below are stock COCO YOLOv8n exports: input ``images``
-# (1, 3, 640, 640) float32, output (1, 84, 8400) -- exactly what
-# :func:`postprocess` decodes.
-DEFAULT_MODEL_URLS: tuple[str, ...] = (
-    "https://huggingface.co/salim4n/yolov8n-detect-onnx/resolve/main/yolov8n-onnx-web/yolov8n.onnx",
-    "https://huggingface.co/inference4j/yolov8n/resolve/main/model.onnx",
-)
-# $SGTRAFFIC_MODEL_URL pins a single source and wins over the built-in list.
-_MODEL_URLS: tuple[str, ...] = (
-    (_env_url,)
-    if (_env_url := os.environ.get("SGTRAFFIC_MODEL_URL"))
-    else DEFAULT_MODEL_URLS
-)
 _CACHE_DIR = Path(
     os.environ.get("SGTRAFFIC_CACHE", Path.home() / ".cache" / "sgtraffic")
 )
@@ -70,6 +52,85 @@ _PAD_COLOR = 114
 
 class DetectionError(RuntimeError):
     """Raised when the model can't be obtained or inference fails."""
+
+
+class ModelIntegrityError(DetectionError):
+    """The bytes we got are not the bytes we pinned.
+
+    A separate type from a plain :class:`DetectionError` because it demands a
+    different response. "The host is down" means *try again later*; "the file
+    does not hash to the value baked into this release" means *something served
+    you a different model* — and that model is about to be handed to ONNX
+    Runtime and executed. Never fall back to running it.
+    """
+
+
+@dataclass(slots=True, frozen=True)
+class ModelSource:
+    """One place to fetch a model from, pinned two ways.
+
+    ``url`` must name an *immutable* revision (a Hugging Face
+    ``/resolve/<commit-sha>/`` path, never ``/resolve/main/``) so the bytes on
+    the far end can't be swapped under us, and ``sha256`` is the digest of those
+    exact bytes so we notice if they are anyway.
+
+    ``sha256`` is ``None`` for a source the *user* supplied (``--model``,
+    ``$SGTRAFFIC_MODEL_URL``): they are deliberately pointing us at different
+    weights, so checking them against our digest would only ever reject a
+    perfectly valid choice. Unverified sources are opt-in by construction —
+    nothing in :data:`DEFAULT_MODEL_SOURCES` may carry ``None``.
+    """
+
+    url: str
+    sha256: str | None
+
+    @classmethod
+    def unverified(cls, url: str) -> ModelSource:
+        """A user-supplied source, exempt from our checksum by design."""
+        return cls(url=url, sha256=None)
+
+
+# Model download + cache configuration (all overridable by env).
+#
+# A *list*, not a single URL, and deliberately so: the original hard-coded
+# default (``Xenova/yolov8n``) went away and started answering 401, which killed
+# ``--detect`` outright for everyone with a cold cache. Community model mirrors
+# disappear; we try each in turn and only fail once every one of them is gone.
+#
+# Every entry below is the same stock COCO YOLOv8n export, and each was checked
+# against the others before being listed: statically shaped input ``images``
+# (1, 3, 640, 640) float32 and output (1, 84, 8400) -- exactly what
+# :func:`postprocess` decodes -- and *identical detections* on the same live
+# frame. Order is by how likely the host is to still be there next year:
+# organisations first, personal accounts last.
+#
+# Two near-misses, recorded so nobody re-adds them: ``EdgeFirst/yolov8-det`` has
+# the right shapes but emits normalized box coordinates, so every detection
+# collapses into the top-left corner (shapes alone prove nothing -- run it); and
+# ``mobilint/YOLOv8n``, from the most reputable account of the lot, declares
+# dynamic batch/class axes instead of the static layout the pipeline and its
+# integration test are written against.
+DEFAULT_MODEL_SOURCES: tuple[ModelSource, ...] = (
+    # Kalray — a listed semiconductor company; ~80 models on HF. Promoted over
+    # the two personal accounts below, which is the whole point of this list.
+    ModelSource(
+        url="https://huggingface.co/Kalray/yolov8/resolve/9e0af089be9c2f172e4fd9b724805f8b6514854e/yolov8n.onnx",
+        sha256="65158dad735be799c2466fa15e260c09558080bd530b42a8d0c3d1b419afd8b5",
+    ),
+    # Demoted: personal accounts, zero downloads, zero likes. Kept as a last
+    # resort now that an organisation-hosted copy leads the list.
+    ModelSource(
+        url="https://huggingface.co/salim4n/yolov8n-detect-onnx/resolve/98100409491fa67f62a2e780a4efe485b86dfd0b/yolov8n-onnx-web/yolov8n.onnx",
+        sha256="162ec5e9d2886fc411e4b81811c731e81a72c8f85571de1e0ab040833d92d4f2",
+    ),
+    # Byte-identical to the Kalray copy above (note the shared digest) — which
+    # is also decent evidence that both are the genuine upstream export. Buys a
+    # second chance at a live repo, not a second artifact.
+    ModelSource(
+        url="https://huggingface.co/inference4j/yolov8n/resolve/66295110f9dd507498735446f4f9f05da3007073/model.onnx",
+        sha256="65158dad735be799c2466fa15e260c09558080bd530b42a8d0c3d1b419afd8b5",
+    ),
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -215,8 +276,72 @@ def postprocess(
 
 
 # --------------------------------------------------------------------------- #
+# Integrity
+# --------------------------------------------------------------------------- #
+def sha256_file(path: Path, *, chunk_size: int = 1 << 20) -> str:
+    """Streaming SHA-256 of ``path``. Never holds the whole model in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def trusted_digests(sources: Sequence[ModelSource]) -> frozenset[str]:
+    """Every digest we would accept from ``sources`` (empty = verification off).
+
+    Empty means the caller is on a user-supplied source and we have nothing to
+    compare against — see :class:`ModelSource`.
+    """
+    return frozenset(s.sha256 for s in sources if s.sha256 is not None)
+
+
+def verify_cached(path: Path, digests: Collection[str]) -> Path:
+    """Re-check an already-cached model, deleting it if it no longer matches.
+
+    Verifying only on download would mean the guarantee expires the moment the
+    file lands: everything after the first run reads an unchecked blob off disk.
+    Hashing ~13 MB costs single-digit milliseconds and happens once per process
+    (``resolve_model`` is called at startup, not per frame), which is noise next
+    to building the ONNX session — so we pay it every time.
+
+    ``digests`` is the set of *all* pinned digests for this model, because the
+    cache does not record which mirror it came from. Empty set = skip (the user
+    supplied their own source).
+    """
+    if not digests:
+        return path
+    actual = sha256_file(path)
+    if actual in digests:
+        return path
+    path.unlink(missing_ok=True)
+    raise ModelIntegrityError(
+        f"Cached model failed its integrity check and was deleted: {path}\n"
+        f"  expected sha256: {' or '.join(sorted(digests))}\n"
+        f"  actual sha256:   {actual}\n"
+        "This is NOT a network problem. Either the file was corrupted or "
+        "tampered with locally, or the pinned model was updated in a newer "
+        "release. Re-run to download a fresh, verified copy."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Model acquisition
 # --------------------------------------------------------------------------- #
+def configured_sources() -> tuple[ModelSource, ...]:
+    """The detection sources to use, honouring ``$SGTRAFFIC_MODEL_URL``.
+
+    Read at call time rather than at import so the override is testable and so
+    a long-lived process picks up a changed environment. A user-set URL wins
+    over the built-in list *and* turns checksum verification off: they asked for
+    those particular weights, so failing them against our digest would be wrong.
+    """
+    override = os.environ.get("SGTRAFFIC_MODEL_URL")
+    if override:
+        return (ModelSource.unverified(override),)
+    return DEFAULT_MODEL_SOURCES
+
+
 def resolve_model(
     explicit: str | None = None,
     *,
@@ -226,9 +351,12 @@ def resolve_model(
     """Locate the ONNX model, downloading + caching it on first use.
 
     Resolution order: ``explicit`` arg -> ``$SGTRAFFIC_MODEL`` -> cached file ->
-    download from the first reachable of :data:`DEFAULT_MODEL_URLS`. Raises
+    download from the first reachable of :data:`DEFAULT_MODEL_SOURCES`. Raises
     :class:`DetectionError` with actionable guidance if it can't be found or
-    fetched.
+    fetched, or :class:`ModelIntegrityError` if what we got isn't what we pinned.
+
+    A path handed in by the user (``explicit`` or ``$SGTRAFFIC_MODEL``) is
+    returned as-is: it is their file, not ours to checksum.
     """
     for candidate in (explicit, os.environ.get("SGTRAFFIC_MODEL")):
         if candidate:
@@ -237,16 +365,17 @@ def resolve_model(
                 raise DetectionError(f"Model file not found: {path}")
             return path
 
+    sources = configured_sources()
     cached = _CACHE_DIR / _MODEL_FILENAME
     if cached.is_file():
-        return cached
+        return verify_cached(cached, trusted_digests(sources))
     if not allow_download:
         raise DetectionError(
             f"No model at {cached} and downloads are disabled. "
             "Pass --model /path/to.onnx or set $SGTRAFFIC_MODEL."
         )
     try:
-        return download_first(_MODEL_URLS, cached, on_progress=on_progress)
+        return download_first(sources, cached, on_progress=on_progress)
     except DetectionError as exc:
         raise DetectionError(
             f"{exc}\nSet $SGTRAFFIC_MODEL_URL to a reachable yolov8n.onnx, or pass "
@@ -256,37 +385,56 @@ def resolve_model(
 
 
 def download_first(
-    urls: Sequence[str],
+    sources: Sequence[ModelSource],
     dest: Path,
     *,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Path:
-    """Try each URL in order, returning the first that downloads successfully.
+    """Try each source in order, returning the first that downloads *and verifies*.
 
     Mirrors are not forever: a repo goes private or is deleted and every cold
-    cache breaks at once. Only when *all* of them fail do we raise, quoting each
-    failure so the user can see whether it's the network or the hosts. The
-    remediation advice is left to the caller — this helper serves both the
+    cache breaks at once. A mirror that answers with the wrong bytes falls
+    through here exactly like a dead one — we would rather try the next pin than
+    execute an unknown model — but its failure line says so, because "the host
+    404s" and "the host served something else" want very different reactions
+    from whoever reads the error. Only when *all* sources fail do we raise. The
+    remediation advice is left to the caller: this helper serves both the
     detection and the segmentation model, which need different hints.
     """
     failures: list[str] = []
-    for url in urls:
+    for source in sources:
         try:
-            return download_model(url, dest, on_progress=on_progress)
+            return download_model(
+                source.url, dest, sha256=source.sha256, on_progress=on_progress
+            )
         except DetectionError as exc:
             failures.append(f"  • {exc}")
     raise DetectionError(
-        "Could not download a model from any known source:\n" + "\n".join(failures)
+        "Could not obtain a verified model from any known source:\n"
+        + "\n".join(failures)
     )
 
 
 def download_model(
-    url: str, dest: Path, *, on_progress: Callable[[int, int], None] | None = None
+    url: str,
+    dest: Path,
+    *,
+    sha256: str | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> Path:
-    """Stream ``url`` to ``dest`` (atomically), reporting progress if asked."""
+    """Stream ``url`` to ``dest`` (atomically), reporting progress if asked.
+
+    The digest is accumulated chunk-by-chunk as the bytes go to disk, so a
+    ~13 MB model is never buffered in memory — let alone twice — and the check
+    costs one extra pass over data we are already touching. Verification happens
+    *before* the atomic rename, so a file that fails it never appears at
+    ``dest`` for ONNX Runtime to pick up; only the ``.part`` is deleted.
+    ``sha256=None`` skips the check (a user-supplied source).
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
+        digest = hashlib.sha256()
         with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
             resp.raise_for_status()
             total = int(resp.headers.get("Content-Length", 0))
@@ -294,16 +442,27 @@ def download_model(
             with tmp.open("wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=1 << 16):
                     fh.write(chunk)
+                    digest.update(chunk)
                     done += len(chunk)
                     if on_progress:
                         on_progress(done, total)
-        tmp.replace(dest)
     except httpx.HTTPError as exc:
         tmp.unlink(missing_ok=True)
         # One line, no remediation advice: the callers (download_first and
         # segment.resolve_model) aggregate these and append their own guidance.
         reason = str(exc).splitlines()[0] or type(exc).__name__
         raise DetectionError(f"Could not download model from {url}: {reason}") from exc
+
+    actual = digest.hexdigest()
+    if sha256 is not None and actual != sha256:
+        tmp.unlink(missing_ok=True)
+        raise ModelIntegrityError(
+            f"Integrity check FAILED for {url}: expected sha256 {sha256}, "
+            f"got {actual} — the download was discarded, not cached. "
+            "The host answered, so this is not a network fault: that revision "
+            "is serving different bytes than the ones this release pinned."
+        )
+    tmp.replace(dest)
     return dest
 
 

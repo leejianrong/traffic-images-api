@@ -14,6 +14,7 @@ layer usable:
 
 from __future__ import annotations
 
+import hashlib
 import io
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from PIL import Image, ImageDraw
 from sgtraffic import api, detect, segment
 
 _NET_TIMEOUT = 20.0
+_DOWNLOAD_TIMEOUT = 180.0
 
 
 def reachable(url: str) -> bool:
@@ -33,6 +35,28 @@ def reachable(url: str) -> bool:
     except httpx.HTTPError:
         return False
     return resp.status_code < 400
+
+
+def fetch_sha256(url: str) -> str:
+    """Stream ``url`` and return the SHA-256 of what comes back.
+
+    Streamed and hashed rather than saved: the caller only wants the digest, and
+    these are ~13-15 MB each.
+
+    The two failure modes are kept apart on purpose, because the caller has to
+    react to them differently. A dead or moved URL raises
+    :class:`httpx.HTTPStatusError` and should go red. A connection that drops
+    raises :class:`httpx.TransportError` and should skip — that is the machine,
+    not the mirror.
+    """
+    digest = hashlib.sha256()
+    with httpx.stream(
+        "GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT
+    ) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_bytes(chunk_size=1 << 16):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @pytest.fixture(scope="session")
