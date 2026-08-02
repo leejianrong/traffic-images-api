@@ -277,3 +277,77 @@ def test_camera_properties_fall_back_for_an_unmapped_id():
     cam = make_camera("9999")
     assert cam.name == "Camera 9999"
     assert cam.expressway == "OTHER"
+
+
+# --------------------------------------------------------------------------- #
+# _parse -- a malformed *camera entry* must not escape the error contract
+#
+# api.py documents "all net errors -> TrafficAPIError", and CLAUDE.md states the
+# same for the module as a whole. The envelope lookup was already guarded, but
+# the per-camera loop was not, so a single bad entry escaped as a raw KeyError /
+# TypeError / ValueError / AttributeError -- a contract violation the CLI's
+# `except TrafficAPIError` handler cannot catch.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("description", "entry"),
+    [
+        ("missing camera_id", {"image": "https://x/y.jpg"}),
+        ("missing image", {"camera_id": "1001"}),
+        ("non-numeric latitude", camera_entry("1001", location={"latitude": "abc"})),
+        ("non-numeric width", camera_entry("1001", image_metadata={"width": "wide"})),
+        ("entry is not a mapping", "not-a-dict"),
+    ],
+)
+def test_parse_wraps_a_malformed_camera_entry(description: str, entry: Any):
+    with json_client(payload(entry)) as client, pytest.raises(TrafficAPIError):
+        fetch_cameras(client)
+
+
+def test_parse_names_the_offending_camera_entry():
+    """The message should point at the bad entry, not just say 'unexpected'."""
+    bad = camera_entry("1001", location={"latitude": "abc"})
+    with json_client(payload(bad)) as client, pytest.raises(TrafficAPIError) as err:
+        fetch_cameras(client)
+
+    assert "1001" in str(err.value)
+
+
+def test_parse_keeps_the_camera_entry_error_as_the_cause():
+    bad = camera_entry("1001", location={"latitude": "abc"})
+    with json_client(payload(bad)) as client, pytest.raises(TrafficAPIError) as err:
+        fetch_cameras(client)
+
+    assert err.value.__cause__ is not None
+    assert isinstance(err.value.__cause__, (KeyError, TypeError, ValueError))
+
+
+def test_a_bad_entry_aborts_rather_than_returning_partial_data():
+    """Deliberate choice: fail loudly instead of silently dropping a camera.
+
+    Skipping the bad entry would be more resilient, but it would also hide an
+    upstream schema change behind a quietly shorter camera list. Aborting keeps
+    the documented contract ("all errors -> TrafficAPIError") and the CLI
+    already renders that as a clean message. Revisit if the live API turns out
+    to ship malformed entries routinely.
+    """
+    good = camera_entry("2702")
+    with (
+        json_client(payload(good, "not-a-dict")) as client,
+        pytest.raises(TrafficAPIError),
+    ):
+        fetch_cameras(client)
+
+
+def test_a_null_coordinate_is_treated_as_absent_not_malformed():
+    """Null is "no value", a wrong type is a real error -- keep the two apart.
+
+    The surrounding code already reads ``c.get("image_metadata") or {}``, so a
+    null field means "absent" throughout this parser. A null latitude therefore
+    defaults to 0.0 rather than aborting the whole fetch, while a non-numeric
+    latitude still raises (covered above).
+    """
+    entry = camera_entry("1001", location={"latitude": None, "longitude": None})
+    with json_client(payload(entry)) as client:
+        (cam,) = fetch_cameras(client)
+
+    assert (cam.latitude, cam.longitude) == (0.0, 0.0)
