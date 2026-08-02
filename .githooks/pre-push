@@ -15,8 +15,8 @@ set -e
 RUFF_VERSION=0.16.1   # keep in sync with .github/workflows/ci.yml
 TY_VERSION=0.0.65     # keep in sync with .github/workflows/ci.yml
 
-echo "▶ ruff check";          uvx "ruff@${RUFF_VERSION}" check src tests
-echo "▶ ruff format --check"; uvx "ruff@${RUFF_VERSION}" format --check src tests
+echo "▶ ruff check";          uvx "ruff@${RUFF_VERSION}" check src tests scripts
+echo "▶ ruff format --check"; uvx "ruff@${RUFF_VERSION}" format --check src tests scripts
 echo "▶ ty check";            uvx "ty@${TY_VERSION}" check src
 echo "▶ pytest";              uv run pytest -q
 echo "✓ pre-push checks passed"

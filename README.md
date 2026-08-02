@@ -26,6 +26,66 @@ minute, so any id printed in a README goes stale. `demo` picks for you.
 You need a TrueColor terminal. Check with `echo $COLORTERM`, which should say
 `truecolor`.
 
+## What it looks like
+
+One frame from camera 4712 (AYE towards Tuas), captured at 00:20 SGT and put
+through each stage. All four come from the same fetch, so they are the same
+moment.
+
+| Original camera frame | `view 4712`, plain pixel art |
+| --- | --- |
+| ![Original traffic camera photo](docs/images/example-original.jpg) | ![The same frame as posterized half-block art](docs/images/example-plain.png) |
+
+| `-d`, vehicles as sprites | `-d -s`, the full de-make |
+| --- | --- |
+| ![Detected cars replaced with pixel-art sprites](docs/images/example-detect.png) | ![Background repainted with tiles, sprites on top](docs/images/example-demake.png) |
+
+In the `-d` frame the two cars have been replaced by drawn sprites: a chunky
+white one in the foreground with yellow headlights, and a smaller one further
+up the road. Note that sprite color is picked from the box position, not from
+the car's actual paint, which is why the red car comes back white. That is
+deliberate, so a jam doesn't render as a row of identical clones.
+
+In the `-d -s` frame the photo is gone entirely. Every background pixel has
+been classified and repainted with a tile: dark road, green verges, the
+blue-windowed building texture on the right.
+
+### The assets
+
+Every sprite and tile is defined in code as a character grid plus a palette,
+so there are no binary assets in the repo. Three car colors, two buses, a
+motorbike and a person (`sprites.py`):
+
+![Pixel-art sprite sheet: red, blue and white cars, orange and yellow buses, a motorbike and a person](docs/images/sprites-sheet.png)
+
+Five background textures, each tiled across whatever region the segmenter
+labels (`tiles.py`): road, sidewalk, building, greenery, sky.
+
+![Tile sheet showing road, sidewalk, building, greenery and sky textures](docs/images/tiles-sheet.png)
+
+### Seeing the sprites at a decent size
+
+Sprites are drawn into the same small buffer as everything else, so how big
+they look depends entirely on how many character cells you have. In an 80x24
+terminal the buffer is about 57x32 pixels and a car covers 2 to 3 of them,
+which reads as a smudge rather than a car. Two things help:
+
+- **Give it room.** Maximise the window and drop the font size. The render
+  caps at 120 columns, which is where the examples above were made, and a
+  foreground car then lands around 16 pixels wide.
+- **Pick a camera with close traffic.** A car 40 pixels wide in a 1920-pixel
+  frame is 2.5 pixels at 120 columns no matter what you do. Checkpoint and
+  flyover cameras frame vehicles much larger than the long expressway views.
+  `uv run sgtraffic list` shows what is live.
+
+Regenerate these images with
+`uv run python scripts/make_example_images.py <camera_id>`. Camera frames
+update every minute or so, so you will get a different scene.
+
+Camera images come from the [Data.gov.sg](https://data.gov.sg) Traffic Images
+API (Land Transport Authority) and are reproduced here under the Singapore Open
+Data Licence.
+
 ## Commands
 
 ```bash
@@ -47,7 +107,7 @@ since the live set changes through the day.
 it finds as hand-made pixel-art sprites stamped over the photo, and prints a
 congestion score:
 
-```
+```text
 CONGESTION [█████░░░░░░░░░░░]  30% MODERATE  car:2 bus:1 bike:1 ped:1
 ```
 
@@ -150,8 +210,8 @@ a push rarely lands red. It takes about a second. Bypass it with
 The same four checks, which are worth running before you commit:
 
 ```bash
-uvx ruff@0.16.1 check src tests
-uvx ruff@0.16.1 format --check src tests
+uvx ruff@0.16.1 check src tests scripts
+uvx ruff@0.16.1 format --check src tests scripts
 uvx ty@0.0.65 check src
 uv run pytest
 ```
@@ -192,17 +252,17 @@ The split is written up in [ADR 0003](docs/adr/0003-two-test-layers.md).
 
 ## Layout
 
-| Module           | Responsibility                                            |
-|------------------|-----------------------------------------------------------|
-| `api.py`         | Data.gov.sg client, `Camera` dataclass, image download    |
-| `locations.py`   | camera-id → friendly name / expressway mapping            |
-| `render.py`      | image → colored half-block art + CRT framing (the engine) |
-| `detect.py`      | YOLOv8n via ONNX Runtime → vehicle/person detections      |
-| `sprites.py`     | code-defined pixel-art sprites, stamped over the photo    |
-| `congestion.py`  | count + occupancy → 0-100 congestion score                |
-| `segment.py`     | SegFormer via ONNX Runtime → per-pixel background classes  |
-| `tiles.py`       | code-defined tileable textures, painted over regions      |
-| `cli.py`         | Typer commands, interactive menu, auto-refresh loop       |
+| Module          | Responsibility                                            |
+| --------------- | --------------------------------------------------------- |
+| `api.py`        | Data.gov.sg client, `Camera` dataclass, image download    |
+| `locations.py`  | camera-id → friendly name / expressway mapping            |
+| `render.py`     | image → colored half-block art + CRT framing (the engine) |
+| `detect.py`     | YOLOv8n via ONNX Runtime → vehicle/person detections      |
+| `sprites.py`    | code-defined pixel-art sprites, stamped over the photo    |
+| `congestion.py` | count + occupancy → 0-100 congestion score                |
+| `segment.py`    | SegFormer via ONNX Runtime → per-pixel background classes |
+| `tiles.py`      | code-defined tileable textures, painted over regions      |
+| `cli.py`        | Typer commands, interactive menu, auto-refresh loop       |
 
 ## Design decisions
 

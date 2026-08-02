@@ -60,8 +60,8 @@ detection; the segmentation model auto-downloads and is overridable via
 ## Quality (run before every commit)
 
 ```bash
-uvx ruff@0.16.1 check src tests            # lint (src *and* tests)
-uvx ruff@0.16.1 format --check src tests   # format (drop --check to rewrite)
+uvx ruff@0.16.1 check src tests scripts            # lint
+uvx ruff@0.16.1 format --check src tests scripts   # format (drop --check to rewrite)
 uvx ty@0.0.65 check src                    # type-check (strict typing everywhere)
 uv run pytest                              # offline tests (no model/network)
 ```
