@@ -26,8 +26,8 @@ jobs:
     name: lint + type-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.17"
           enable-cache: true
@@ -46,8 +46,8 @@ jobs:
     name: pytest (offline)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.17"
           enable-cache: true
@@ -80,8 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.17"
           enable-cache: true
@@ -130,8 +130,8 @@ jobs:
     continue-on-error: true
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.17"
           enable-cache: true
@@ -140,7 +140,7 @@ jobs:
       # Cache the weights between runs so a HF outage doesn't automatically mean
       # a skipped suite -- and so the scheduled run is not a fresh 28 MB pull.
       - name: cache models
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/sgtraffic
           key: sgtraffic-models-v1
