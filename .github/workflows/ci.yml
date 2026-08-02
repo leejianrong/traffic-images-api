@@ -36,9 +36,9 @@ jobs:
       - name: install (frozen)
         run: uv sync --frozen
       - name: ruff (lint)
-        run: uvx ruff@0.16.1 check src tests
+        run: uvx ruff@0.16.1 check src tests scripts
       - name: ruff (format)
-        run: uvx ruff@0.16.1 format --check src tests
+        run: uvx ruff@0.16.1 format --check src tests scripts
       - name: ty (type-check)
         run: uvx ty@0.0.65 check src
 
