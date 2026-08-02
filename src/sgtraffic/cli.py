@@ -348,6 +348,55 @@ def view(
             _fatal(str(exc))
 
 
+# --------------------------------------------------------------------------- #
+# `demo`
+# --------------------------------------------------------------------------- #
+@app.command("demo")
+def demo(
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Draw a single frame instead of streaming."),
+    ] = False,
+    refresh: Annotated[
+        int,
+        typer.Option("--refresh", "-r", help="Seconds between frames."),
+    ] = 15,
+) -> None:
+    """Show off the full de-make on whichever camera is live right now.
+
+    The one command to run if you just want to see what this does. Camera ids
+    come and go (the API only returns cameras that are live this minute), so
+    picking one by hand means looking it up first; this picks for you, then
+    downloads the models if they aren't cached yet and renders tiled background
+    regions with pixel-art vehicles on top.
+    """
+    with _client() as client:
+        cam = _cameras(client)[0]
+        console.print(
+            f"[dim]Picked[/] [bold yellow]{cam.camera_id}[/] [dim]({cam.name}). "
+            f"First run downloads ~28 MB of models to ~/.cache/sgtraffic/.[/]"
+        )
+        # Built after the camera lookup so an API outage fails fast, before we
+        # spend a download on a frame we can't fetch anyway.
+        detector = _build_detector(None, 0.25)
+        segmenter = _build_segmenter(None)
+        try:
+            if once:
+                img = api.download_image(cam.image_url, client)
+                _draw(
+                    cam,
+                    img,
+                    bits=4,
+                    refresh=None,
+                    detector=detector,
+                    segmenter=segmenter,
+                )
+            else:
+                _stream(cam.camera_id, refresh, 4, client, detector, segmenter)
+        except TrafficAPIError as exc:
+            _fatal(str(exc))
+
+
 def _stream(
     camera_id: str,
     interval: int,

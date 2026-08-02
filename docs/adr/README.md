@@ -18,5 +18,5 @@ A superseded ADR stays in place with its status changed and a pointer forward.
 
 Copy the shape of an existing file: title, status, date, then **context →
 decision → consequences**. Keep it to one screen. Record the decision and its
-price, not a tutorial — if it needs a diagram it is probably documentation, not
+price, not a tutorial. If it needs a diagram it is probably documentation, not
 an ADR.
