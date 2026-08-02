@@ -66,9 +66,10 @@ uv run pytest                              # offline tests (no model/network)
 ```
 
 **Two test layers, split by cost.** `uv run pytest` runs only the fast layer:
-`tests/*.py`, synthetic fixtures, no model and no network, ~90 tests in under a
+`tests/*.py`, synthetic fixtures, no model and no network, ~150 tests in under a
 second. That is what the pre-push hook and the required CI jobs run, and it must
-stay that way.
+stay that way — see [ADR 0003](docs/adr/0003-two-test-layers.md) for why the
+fast layer must never touch infra.
 
 `tests/integration/` is the heavy layer — real ONNX weights (~28 MB, downloaded
 and cached on first run) and the live Data.gov.sg API. It is marked
@@ -101,6 +102,26 @@ once per clone — then a push rarely lands red:
 ```bash
 git config core.hooksPath .githooks   # bypass a single push with --no-verify
 ```
+
+CI runs four jobs. `quality` and `test` gate merges; `audit` (`pip-audit` over
+the locked deps) and `integration` are **advisory** — they report into the job
+summary but never block, because a transitive advisory with no fixed release
+would otherwise redden every unrelated PR until someone silenced it. Dependabot
+(`.github/dependabot.yml`) raises weekly grouped updates, and *those* PRs are
+gated normally. Note Dependabot cannot see the `uvx ruff@…`/`ty@…` run-step
+pins, the `setup-uv` version, or the model weights — all hand-bumped.
+
+## Design decisions
+
+Load-bearing choices are recorded as ADRs in [`docs/adr/`](docs/adr/) — read
+them before reversing any of the following, because each has consequences that
+are not obvious from the code alone:
+
+| ADR | Decision |
+|---|---|
+| [0001](docs/adr/0001-onnxruntime-not-ultralytics.md) | ONNX Runtime, not the AGPL `ultralytics` package (hence the hand-rolled letterbox/NMS/postprocess) |
+| [0002](docs/adr/0002-raw-ansi-raster-not-rich.md) | The raster is printed raw, not through Rich (guarded by escape-count tests) |
+| [0003](docs/adr/0003-two-test-layers.md) | Two test layers split by cost |
 
 ## Gotchas
 
