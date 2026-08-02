@@ -14,7 +14,8 @@ uv run sgtraffic view 6710 -r 20 # live monitor, refresh every 20s
 uv run sgtraffic view 2701 --once --bits 3   # force one frame, chunkier retro
 uv run sgtraffic view 2705 --detect          # sprites + congestion score
 uv run sgtraffic view 2705 -d -s             # full de-make (tiles + sprites)
-uv run pytest                    # offline test suite (synthetic fixtures)
+uv run pytest                    # fast layer: offline test suite (synthetic fixtures)
+uv run pytest -m integration     # heavy layer: real ONNX models + live API
 ```
 
 Use `uv` for everything — never call `pip` or a bare `python`. Python 3.12+.
@@ -64,6 +65,28 @@ uvx ty@0.0.65 check src                    # type-check (strict typing everywher
 uv run pytest                              # offline tests (no model/network)
 ```
 
+**Two test layers, split by cost.** `uv run pytest` runs only the fast layer:
+`tests/*.py`, synthetic fixtures, no model and no network, ~90 tests in under a
+second. That is what the pre-push hook and the required CI jobs run, and it must
+stay that way.
+
+`tests/integration/` is the heavy layer — real ONNX weights (~28 MB, downloaded
+and cached on first run) and the live Data.gov.sg API. It is marked
+`integration` and **deselected by default**; opt in explicitly:
+
+```bash
+uv run pytest -m integration       # real models, real network
+uv run pytest -m integration -rs   # ...and show why anything skipped
+```
+
+It covers what synthetic fixtures structurally cannot: that the model URLs still
+resolve, that ONNX Runtime loads the file, that the real tensor shapes match
+what `postprocess` assumes, and that a live frame survives the whole
+`bytes → detections → sprites → lines` / `bytes → labels → tiles` path. Missing
+infrastructure **skips**, never fails, so it is still runnable offline. In CI it
+is an advisory `integration` job (weekly + `workflow_dispatch`, `continue-on-error`)
+that never gates a PR.
+
 **Always pin the tool versions.** A bare `uvx ruff` floats to the latest
 release, which enables rules CI has never run — the local gate then fails on
 findings CI ignores (or, worse, passes on ones it won't). The pins above,
@@ -85,4 +108,6 @@ git config core.hooksPath .githooks   # bypass a single push with --no-verify
 - **The raster is printed raw, NOT through Rich** — Rich re-emits an SGR + reset per cell, killing the run-length optimization. Rich is only for menus/tables/status; the pixel art goes straight to `print()`. Don't route it back through Rich.
 - **The API returns only currently-live cameras** (often ~8, sometimes ~90) — code must handle any count. `locations.py` carries the full name map regardless.
 - **Dimensions are recomputed every frame** from the live terminal size, so resizing mid-stream is safe. Never hard-code width/height.
-- **Detection needs a model file the sandboxed web env can't fetch** — the model host (GitHub/HF) and the live traffic API are blocked by the package-registries-only network policy. Tests are fully offline (synthetic tensors + a fake session); real `--detect` runs happen on a machine with open network. Keep detection logic testable without a model.
+- **Detection needs a model file the sandboxed web env can't fetch** — the model host (GitHub/HF) and the live traffic API are blocked by the package-registries-only network policy. The fast tests are fully offline (synthetic tensors + a fake session); real `--detect` runs and `pytest -m integration` happen on a machine with open network. Keep detection logic testable without a model.
+- **Model URLs rot.** Both original defaults (`Xenova/yolov8n`, `onnx-community/segformer-b0-...`) were deleted from HF and started returning `401`, silently killing `--detect` and `--segment` on every cold cache. Each module now carries a *list* of mirrors (`detect.DEFAULT_MODEL_URLS`, `segment.DEFAULT_SEG_MODEL_URLS`) tried in order by `detect.download_first`. Never collapse these back to a single URL, and keep `tests/integration/test_model_sources.py` — it is the only thing that notices when a mirror dies.
+- **Replacement weights must match the assumed tensor layout.** Detection expects a stock COCO YOLOv8n export: input `(1, 3, 640, 640)` float32, output `(1, 84, 8400)`. Segmentation expects a 19-class Cityscapes SegFormer whose channel order follows the `trainId` convention baked into `CITYSCAPES_TO_CATEGORY` — get that ordering wrong and the road gets painted with the sky tile, which *looks* fine and is completely wrong.

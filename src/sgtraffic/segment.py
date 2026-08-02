@@ -9,7 +9,7 @@ Same shape as :mod:`detect`: the math (:func:`preprocess`, :func:`postprocess`)
 is free-standing and unit-tested against synthetic logits; ``onnxruntime`` is
 imported lazily inside :class:`Segmenter`; the model is fetched at runtime into a
 cache dir (never committed) and is fully overridable. We reuse
-:func:`detect.download_model` rather than duplicating the streaming download.
+:func:`detect.download_first` rather than duplicating the streaming download.
 
 Class ids follow the **Cityscapes** 19-class ``trainId`` convention (the usual
 output space for road-scene models). Map them to our coarse tile categories via
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .detect import download_model
+from .detect import download_first
 
 # Cityscapes trainId -> our coarse background category (None = leave the photo).
 CITYSCAPES_TO_CATEGORY: dict[int, str] = {
@@ -42,9 +42,20 @@ CITYSCAPES_TO_CATEGORY: dict[int, str] = {
     10: "sky",
 }
 
-_DEFAULT_SEG_MODEL_URL = os.environ.get(
-    "SGTRAFFIC_SEG_MODEL_URL",
-    "https://huggingface.co/onnx-community/segformer-b0-finetuned-cityscapes-1024-1024/resolve/main/onnx/model.onnx",
+# Like :data:`detect.DEFAULT_MODEL_URLS`, a list rather than one URL: the
+# original default (``onnx-community/segformer-b0-...``) now answers 401, which
+# broke ``--segment`` on every cold cache. Each entry is a SegFormer-B0 export
+# fine-tuned on Cityscapes whose 19 output channels follow the trainId order
+# assumed by :data:`CITYSCAPES_TO_CATEGORY`.
+DEFAULT_SEG_MODEL_URLS: tuple[str, ...] = (
+    "https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-1024-1024/resolve/main/onnx/model.onnx",
+    "https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/resolve/main/onnx/model.onnx",
+)
+# $SGTRAFFIC_SEG_MODEL_URL pins a single source and wins over the built-in list.
+_SEG_URLS: tuple[str, ...] = (
+    (_env_url,)
+    if (_env_url := os.environ.get("SGTRAFFIC_SEG_MODEL_URL"))
+    else DEFAULT_SEG_MODEL_URLS
 )
 _CACHE_DIR = Path(
     os.environ.get("SGTRAFFIC_CACHE", Path.home() / ".cache" / "sgtraffic")
@@ -132,8 +143,8 @@ def resolve_model(
             "Pass --seg-model /path/to.onnx or set $SGTRAFFIC_SEG_MODEL."
         )
     try:
-        return download_model(_DEFAULT_SEG_MODEL_URL, cached, on_progress=on_progress)
-    except Exception as exc:  # download_model raises DetectionError on failure
+        return download_first(_SEG_URLS, cached, on_progress=on_progress)
+    except Exception as exc:  # download_first raises DetectionError on failure
         raise SegmentationError(
             f"Could not download segmentation model: {exc}\n"
             "Set $SGTRAFFIC_SEG_MODEL_URL to a reachable Cityscapes .onnx, or pass "

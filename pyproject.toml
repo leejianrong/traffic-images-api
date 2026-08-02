@@ -27,3 +27,23 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+# Two test layers, split by cost.
+#
+#   uv run pytest                 -> the fast layer only: no model, no network,
+#                                    sub-second, and what the pre-push hook runs.
+#   uv run pytest -m integration  -> the heavy layer under tests/integration:
+#                                    downloads real ONNX models, creates real
+#                                    sessions, and talks to the live camera API.
+#
+# `addopts` deselects the heavy layer by default; a later `-m` on the command
+# line overrides it, which is what makes `-m integration` the opt-in switch.
+# Integration modules must keep module-level imports cheap (onnxruntime is
+# loaded lazily inside fixtures) because pytest still *imports* them before
+# deselecting.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: needs a real ONNX model and/or the live Data.gov.sg API (deselected by default)",
+]
